@@ -9,6 +9,7 @@ import sys
 
 import rospy
 from geometry_msgs import msg as geom
+from sensor_msgs import msg as sensor
 
 import gi
 gi.require_version('Gtk', '3.0')
@@ -92,6 +93,7 @@ class DisplayWidget (Gtk.EventBox):
         self.image_widget = Gtk.Image()
         self.add(self.image_widget)
 
+        self.camera_im = Image.new('RGB', (1, 1))
         self.im = Image.new('RGB', (CANVAS_SIZE,) * 2)
         self.update_image()
         self.connect('size-allocate', self.update_display)
@@ -99,8 +101,10 @@ class DisplayWidget (Gtk.EventBox):
         self.connect('button-release-event', self.update_buttons)
         self.connect('motion-notify-event', self.handle_motion)
         self.connect('scroll-event', self.handle_scroll)
+        GLib.timeout_add(50, self.request_full_update)
 
-        GLib.timeout_add(100, lambda: self.update_display() or True)
+        self.camera_sub = rospy.Subscriber('/camera/rgb/image_raw',
+                sensor.Image, self.camera_callback)
 
     def do_get_preferred_width(self):
         return self.win.get_size().width - 2
@@ -140,7 +144,8 @@ class DisplayWidget (Gtk.EventBox):
         if not self.going_to_update:
             self.going_to_update = True
             self.update_display()
-            GLib.timeout_add(100, self.do_full_update_now)
+            GLib.timeout_add(40, self.do_full_update_now)
+        return True
 
     def do_full_update_now(self, user_data=None):
         self.update_image()
@@ -151,9 +156,31 @@ class DisplayWidget (Gtk.EventBox):
 
     pointer_polygon = [(0, -10), (8, 10), (0, 5), (-8, 10)]
 
-    def draw_on_virtual(self, resized):
-        draw = ImageDraw.Draw(resized)
+    def draw_camera(self, resized, width, height):
+        size = max(width, height)
+        if size == 0:
+            return
+        camera_width = self.camera_im.width
+        camera_height = self.camera_im.height
+        if (camera_width / camera_height) > (width / height):
+            new_width = width
+            new_height = (width * camera_height) // camera_width
+            x = (size - new_width) // 2
+            y = (size - new_height) // 2
+        else:
+            new_width = (height * camera_width) // camera_height
+            new_height = height
+            x = (size - new_width) // 2
+            y = (size - new_height) // 2
+        camera_resized = self.camera_im.resize((new_width, new_height),
+                Image.NEAREST)
+        resized.paste(camera_resized, (x, y))
+
+    def draw_on_virtual(self, resized, width, height):
+        # Paste camera data
+        self.draw_camera(resized, width, height)
         # TODO: draw
+        draw = ImageDraw.Draw(resized)
         pass
 
     def update_display(self, widget=None, allocation=None, data=None):
@@ -163,8 +190,8 @@ class DisplayWidget (Gtk.EventBox):
         width = min(win_width - 2, allocation.width)
         height = min(win_height - 2, allocation.height)
         size = max(width, height)
-        resized = self.im.resize((size,) * 2)
-        self.draw_on_virtual(resized)
+        resized = self.im.resize((size,) * 2, Image.NEAREST)
+        self.draw_on_virtual(resized, width, height)
         x = int(math.ceil((size - width) / 2))
         y = int(math.ceil((size - height) / 2))
         if (2 * x) >= resized.width or (2 * y) > resized.height:
@@ -177,6 +204,11 @@ class DisplayWidget (Gtk.EventBox):
     def update_image(self):
         # TODO: render
         pass
+
+    def camera_callback(self, msg):
+        if msg.encoding != 'rgb8':
+            sys.stderr.write('Camera must be rgb8, not {}.\n'.format(msg.encoding))
+        self.camera_im = Image.frombytes('RGB', (msg.width, msg.height), msg.data)
 
 
 class MainWindow (Gtk.Window):
