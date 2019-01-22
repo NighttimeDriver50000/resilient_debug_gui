@@ -12,6 +12,8 @@ import rospy
 from geometry_msgs import msg as geom
 from sensor_msgs import msg as sensor
 
+from landmark_detection import msg as landmark
+
 import gi
 gi.require_version('Gtk', '3.0')
 from gi.repository import Gtk, GdkPixbuf, Gdk, GLib, GObject
@@ -35,19 +37,34 @@ class SidebarWidget (Gtk.ScrolledWindow):
         self.grid = Gtk.Grid()
         self.show_scan_check = Gtk.CheckButton.new_with_label(
                 'Show current scan with landmarks')
-        self.show_scan_check.set_sensitive(False)
+        self.show_scan_check.set_active(True)
+        self.big_scan_check = Gtk.CheckButton.new_with_label(
+                'Enlarge scan')
+        self.big_scan_check.set_active(False)
         self.show_map_check = Gtk.CheckButton.new_with_label(
                 'Show map instead of camera')
         self.show_map_check.set_sensitive(False)
+        self.show_map_check.set_active(False)
         self.show_camera_check = Gtk.CheckButton.new_with_label(
                 'Still show camera with map')
         self.show_camera_check.set_sensitive(False)
+        self.show_camera_check.set_active(True)
 
-        self.grid.insert_column(0)
-        self.grid.insert_row(0)
-        self.grid.attach(self.show_scan_check, 0, 0, 1, 1)
-        self.grid.attach(self.show_map_check, 0, 1, 1, 1)
-        self.grid.attach(self.show_camera_check, 0, 2, 1, 1)
+        self.landmark_label = Gtk.Label.new('Landmark Colors')
+        self.column_label = Gtk.Label.new('Column:')
+        self.column_color = Gtk.ColorButton.new_with_rgba(Gdk.RGBA(0.8, 0.8, 0))
+        self.wall_label = Gtk.Label.new('Wall:')
+        self.wall_color = Gtk.ColorButton.new_with_rgba(Gdk.RGBA(0, 0.8, 0.8))
+
+        self.grid.attach(self.show_scan_check, 0, 0, 5, 1)
+        self.grid.attach(self.big_scan_check, 1, 1, 4, 1)
+        self.grid.attach(self.show_map_check, 0, 2, 5, 1)
+        self.grid.attach(self.show_camera_check, 1, 3, 4, 1)
+        self.grid.attach(self.landmark_label, 0, 4, 5, 1)
+        self.grid.attach(self.column_label, 1, 5, 1, 1)
+        self.grid.attach(self.column_color, 2, 5, 1, 1)
+        self.grid.attach(self.wall_label, 3, 5, 1, 1)
+        self.grid.attach(self.wall_color, 4, 5, 1, 1)
         
         self.add(self.grid)
 
@@ -56,12 +73,6 @@ class SidebarWidget (Gtk.ScrolledWindow):
 
     def do_get_preferred_width_for_height(self, height):
         return self.grid.get_preferred_width_for_height(height)
-
-
-def pil_to_pixbuf(im):
-    pixels = GLib.Bytes(im.convert('RGB').tobytes('raw', 'RGB', 0, 1))
-    return GdkPixbuf.Pixbuf.new_from_bytes(pixels, GdkPixbuf.Colorspace.RGB,
-            False, 8, im.width, im.height, im.width * 3)
 
 
 def pil_to_surface(im):
@@ -82,6 +93,16 @@ def transformed_polygon(polygon, rotate, translate):
     return new_polygon
 
 
+def get_color_tuple(color_chooser):
+    rgba = color_chooser.get_rgba()
+    use_alpha = color_chooser.get_use_alpha()
+    if use_alpha:
+        color = (rgba.red, rgba.green. rgba.blue, rgba.alpha)
+    else:
+        color = (rgba.red, rgba.green, rgba.blue)
+    return tuple(int(255 * c) for c in color)
+
+
 class DisplayWidget (Gtk.EventBox):
     def __init__(self, win):
         Gtk.EventBox.__init__(self)
@@ -98,11 +119,13 @@ class DisplayWidget (Gtk.EventBox):
         self.motion_prev_x = None
         self.motion_prev_y = None
         self.image_surface = None
+        
+        self.camera_im = Image.new('RGB', (1, 1))
+        self.scan_msg = None
+        self.landmarks = []
 
         self.image_widget = Gtk.DrawingArea()
         self.add(self.image_widget)
-
-        self.camera_im = Image.new('RGB', (1, 1))
         self.im = Image.new('RGB', (CANVAS_SIZE,) * 2)
         self.update_image()
         self.connect('size-allocate', self.update_display)
@@ -115,6 +138,10 @@ class DisplayWidget (Gtk.EventBox):
         self.connect('draw', self.draw_callback)
         self.camera_sub = rospy.Subscriber('/camera/rgb/image_raw',
                 sensor.Image, self.camera_callback)
+        self.scan_sub = rospy.Subscriber('/scan',
+                sensor.LaserScan, self.scan_callback)
+        self.rel_landmarks_sub = rospy.Subscriber('/relative_landmarks',
+                landmark.LandmarkMsgs, self.rel_landmarks_callback)
 
     def do_get_preferred_width(self):
         return self.win.get_size().width - 2
@@ -162,6 +189,7 @@ class DisplayWidget (Gtk.EventBox):
         self.update_display()
         self.queue_draw()
         self.going_to_update = False
+        self.queue_draw()
         return False
 
     pointer_polygon = [(0, -10), (8, 10), (0, 5), (-8, 10)]
@@ -186,11 +214,42 @@ class DisplayWidget (Gtk.EventBox):
                 Image.NEAREST)
         resized.paste(camera_resized, (x, y))
 
+    def draw_scan_landmarks(self, resized, width, height):
+        scan = self.scan_msg
+        if scan is None or not self.win.sidebar.show_scan_check.get_active():
+            return
+        draw = ImageDraw.Draw(resized)
+        big_scan = self.win.sidebar.big_scan_check.get_active()
+        size = int(min(width, height) * (0.6 if big_scan else 0.2))
+        r = size / 2
+        cx = r + ((resized.width - width) / 2)
+        cy = r + ((resized.height - height) / 2)
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], (0, 0, 0), (255, 0, 0))
+        draw.line([cx, cy, cx, cy - r], (255, 0, 0), 1)
+        for i in xrange(len(scan.ranges)):
+            hit_angle = scan.angle_min + (i * scan.angle_increment)
+            hit_range = scan.ranges[i]
+            if (hit_range < scan.range_min or hit_range > scan.range_max
+                    or hit_angle > scan.angle_max):
+                continue
+            hit_range *= r / scan.range_max
+            x = cx - (hit_range * math.sin(hit_angle))
+            y = cy - (hit_range * math.cos(hit_angle))
+            draw.line([cx, cy, x, y], (255, 255, 255), 1)
+        for (wall, lx, ly) in self.landmarks:
+            if wall:
+                color = get_color_tuple(self.win.sidebar.wall_color)
+            else:
+                color = get_color_tuple(self.win.sidebar.column_color)
+            x = cx - (ly * r / scan.range_max)
+            y = cy - (lx * r / scan.range_max)
+            draw.ellipse([x - 2, y - 2, x + 2, y + 2], color)
+
     def draw_on_virtual(self, resized, width, height):
         # Paste camera data
         self.draw_camera(resized, width, height)
+        self.draw_scan_landmarks(resized, width, height)
         # TODO: draw
-        draw = ImageDraw.Draw(resized)
         pass
 
     def update_display(self, widget=None, allocation=None, data=None):
@@ -225,6 +284,16 @@ class DisplayWidget (Gtk.EventBox):
         if msg.encoding != 'rgb8':
             sys.stderr.write('Camera must be rgb8, not {}.\n'.format(msg.encoding))
         self.camera_im = Image.frombytes('RGB', (msg.width, msg.height), msg.data)
+    
+    def scan_callback(self, msg):
+        self.scan_msg = msg
+    
+    def rel_landmarks_callback(self, msg):
+        self.landmarks = []
+        for column in msg.columns:
+            self.landmarks.append((False, column.position.x, column.position.y))
+        for wall in msg.walls:
+            self.landmarks.append((True, wall.position.x, wall.position.y))
 
 
 class MainWindow (Gtk.Window):
