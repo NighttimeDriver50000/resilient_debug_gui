@@ -2,6 +2,7 @@
 from __future__ import absolute_import, division, print_function
 from builtins import *
 
+import array
 import math
 import os
 from os import path
@@ -63,6 +64,13 @@ def pil_to_pixbuf(im):
             False, 8, im.width, im.height, im.width * 3)
 
 
+def pil_to_surface(im):
+    r, g, b, a = im.convert('RGBA').split()
+    data = Image.merge('RGBA', (b, g, r, a)).tobytes()
+    return cairo.ImageSurface.create_for_data(array.array('B', data),
+            cairo.FORMAT_ARGB32, im.width, im.height, im.width * 4)
+
+
 def transformed_polygon(polygon, rotate, translate):
     new_polygon = []
     for x, y in polygon:
@@ -89,8 +97,9 @@ class DisplayWidget (Gtk.EventBox):
         self.crop_rect = (0, 0, 0, 0)
         self.motion_prev_x = None
         self.motion_prev_y = None
+        self.image_surface = None
 
-        self.image_widget = Gtk.Image()
+        self.image_widget = Gtk.DrawingArea()
         self.add(self.image_widget)
 
         self.camera_im = Image.new('RGB', (1, 1))
@@ -101,8 +110,9 @@ class DisplayWidget (Gtk.EventBox):
         self.connect('button-release-event', self.update_buttons)
         self.connect('motion-notify-event', self.handle_motion)
         self.connect('scroll-event', self.handle_scroll)
-        GLib.timeout_add(50, self.request_full_update)
 
+        GLib.timeout_add(50, self.request_full_update)
+        self.connect('draw', self.draw_callback)
         self.camera_sub = rospy.Subscriber('/camera/rgb/image_raw',
                 sensor.Image, self.camera_callback)
 
@@ -198,12 +208,18 @@ class DisplayWidget (Gtk.EventBox):
             return
         self.crop_rect = (x, y, resized.width - x, resized.height - y)
         cropped = resized.crop(self.crop_rect)
-        pixbuf = pil_to_pixbuf(cropped)
-        self.image_widget.set_from_pixbuf(pixbuf)
+        self.image_surface = pil_to_surface(cropped)
 
     def update_image(self):
         # TODO: render
         pass
+
+    def draw_callback(self, widget, cr, data=None):
+        if self.image_surface is None:
+            return True
+        cr.set_source_surface(self.image_surface)
+        cr.paint()
+        return True
 
     def camera_callback(self, msg):
         if msg.encoding != 'rgb8':
