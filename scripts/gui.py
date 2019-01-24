@@ -9,21 +9,23 @@ from os import path
 import sys
 
 import rospy
-from geometry_msgs import msg as geom
 from sensor_msgs import msg as sensor
 
 from landmark_detection import msg as landmark
 
+import auto_pose
+
 import gi
 gi.require_version('Gtk', '3.0')
-from gi.repository import Gtk, GdkPixbuf, Gdk, GLib, GObject
+from gi.repository import Gtk, Gdk, GLib
 
 import cairo
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 import tomlkit
 
-CANVAS_SIZE = 1024
+MAP_CANVAS_SIZE = 1024
+MAP_DEFAULT_ZOOM = 2
 CONFIG_FILENAME = 'resilient_debug_gui.toml'
 
 CONFIG_DIRPATH = path.join(path.expanduser('~'), '.config')
@@ -111,7 +113,7 @@ class DisplayWidget (Gtk.EventBox):
 
         self.map_cx = 0
         self.map_cy = 0
-        self.map_zoom = 2
+        self.map_zoom = MAP_DEFAULT_ZOOM
 
         self.button1_down = False
         self.going_to_update = False
@@ -126,7 +128,7 @@ class DisplayWidget (Gtk.EventBox):
 
         self.image_widget = Gtk.DrawingArea()
         self.add(self.image_widget)
-        self.im = Image.new('RGB', (CANVAS_SIZE,) * 2)
+        self.im = Image.new('RGB', (MAP_CANVAS_SIZE,) * 2)
         self.update_image()
         self.connect('size-allocate', self.update_display)
         self.connect('button-press-event', self.update_buttons)
@@ -136,6 +138,7 @@ class DisplayWidget (Gtk.EventBox):
 
         GLib.timeout_add(50, self.request_full_update)
         self.connect('draw', self.draw_callback)
+        self.auto_pose = auto_pose.AutoPose('/odom')
         self.camera_sub = rospy.Subscriber('/camera/rgb/image_raw',
                 sensor.Image, self.camera_callback)
         self.scan_sub = rospy.Subscriber('/scan',
@@ -225,17 +228,18 @@ class DisplayWidget (Gtk.EventBox):
         cx = r + ((resized.width - width) / 2)
         cy = r + ((resized.height - height) / 2)
         draw.ellipse([cx - r, cy - r, cx + r, cy + r], (0, 0, 0), (255, 0, 0))
-        draw.line([cx, cy, cx, cy - r], (255, 0, 0), 1)
         for i in xrange(len(scan.ranges)):
             hit_angle = scan.angle_min + (i * scan.angle_increment)
             hit_range = scan.ranges[i]
-            if (hit_range < scan.range_min or hit_range > scan.range_max
-                    or hit_angle > scan.angle_max):
+            if hit_range == 0 or hit_range > scan.range_max:
+                hit_range = scan.range_max
+            if hit_range < scan.range_min or hit_angle > scan.angle_max:
                 continue
             hit_range *= r / scan.range_max
             x = cx - (hit_range * math.sin(hit_angle))
             y = cy - (hit_range * math.cos(hit_angle))
             draw.line([cx, cy, x, y], (255, 255, 255), 1)
+        draw.line([cx, cy, cx, cy - r], (255, 0, 0), 1)
         for (wall, lx, ly) in self.landmarks:
             if wall:
                 color = get_color_tuple(self.win.sidebar.wall_color)

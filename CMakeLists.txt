@@ -4,7 +4,7 @@ project(resilient_debug_gui)
 find_package(catkin REQUIRED COMPONENTS
   rospy
   std_msgs
-  geometry_msgs
+  nav_msgs
   landmark_detection
 )
 
